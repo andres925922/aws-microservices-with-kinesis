@@ -14,7 +14,7 @@
     "outDir": "./build",
     "paths": {
       "@http/*": [
-        "./src/http/core/*"
+        "./src/httpApi/core/*"
       ],
       "@event/*": [
         "./src/event/*"

@@ -1,0 +1,440 @@
+service: ecommerce-event-hub
+frameworkVersion: "4"
+plugins:
+  - serverless-offline
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ${opt:region, 'us-east-1'}
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 30
+  logRetentionInDays: 7
+  tracing:
+    apiGateway: true
+    lambda: true
+  environment:
+    STAGE: ${self:provider.stage}
+    REGION: ${self:provider.region}
+    TABLE_NAME: ${self:custom.tableName}
+    EVENT_BUS_NAME: ${self:custom.eventBusName}
+    KINESIS_STREAM_NAME: ${self:custom.kinesisStreamName}
+    DLQ_NAME: ${self:custom.dlqqName}
+    EVENT_SOURCE: ${self:provider.stage}::ecommerce-event-hub
+    NODE_OPTIONS: --enable-source-maps
+
+custom:
+  tableName: ${self:provider.stage}-ecommerce-table
+  eventBusName: ${self:provider.stage}-ecommerce-event-bus
+  kinesisStreamName: ${self:provider.stage}-ecommerce-kinesis-stream
+  dlqqName: ${self:provider.stage}-ecommerce-dlq
+  faultGroupName: /aws/events/${self:provider.stage}/ecommerce-fault-events-log-group
+  maxUpdateParallel: 10
+  updateParallel: 4
+  publishBatchSize: 25
+
+iam:
+  role:
+    statements:
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+          - dynamodb:GetItem
+          - dynamodb:UpdateItem
+          - dynamodb:DeleteItem
+          - dynamodb:Query
+          - dynamodb:Scan
+          - dynamodb:BatchGetItem
+          - dynamodb:BatchWriteItem
+        Resource:
+          Fn::GetAtt:
+            - EcommerceTable
+            - Arn
+          Fn:Sub:
+            - Fn::GetAtt:
+                - EcommerceTable
+                - Arn
+            - "/index/*"
+
+      - Effect: Allow
+        Action: events:PutEvents
+        Resource:
+          Fn::GetAtt:
+            - EcommerceEventBus
+            - Arn
+
+      - Effect: Allow
+        Action:
+          - kinesis:GetRecords
+          - kinesis:GetShardIterator
+          - kinesis:DescribeStream
+          - kinesis:ListShards
+        Resource:
+          Fn::GetAtt:
+            - EcommerceKinesisStream
+            - Arn
+
+      - Effect: Allow
+        Action:
+          - sqs:SendMessage
+          - sqs:ReceiveMessage
+          - sqs:DeleteMessage
+          - sqs:GetQueueAttributes
+          - sqs:ChangeMessageVisibility
+        Resource:
+          Fn::GetAtt:
+            - ConsumerDLQ
+            - Arn
+
+      - Effect: Allow
+        Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+        Resource:
+          Fn::Sub:
+            - "arn:aws:logs:*:*:*"
+
+      - Effect: Allow
+        Action:
+          - xray:PutTraceSegments
+          - xray:PutTelemetryRecords
+        Resource: "*"
+
+functions:
+  httpApi:
+    handler: src/httpApi/index.handler
+    description: "HTTP API Lambda function"
+    events:
+      - http: { path: "/product", method: get, cors: true }
+      - http: { path: "/product", method: post, cors: true }
+      - http: { path: "/product/{id}", method: get, cors: true }
+      - http: { path: "/product/{id}", method: put, cors: true }
+      - http: { path: "/product/{id}", method: delete, cors: true }
+      - http: { path: "/order", method: post, cors: true }
+      - http: { path: "/order/{id}", method: get, cors: true }
+      - http: { path: "/basket", method: post, cors: true }
+      - http: { path: "/basket/{id}", method: get, cors: true }
+      - http: { path: "/basket/{id}", method: delete, cors: true }
+
+  orderConsumer:
+    handler: src/consumers/orderConsumer/index.handler
+    description: "Order Consumer Lambda function"
+    timeout: 300
+    environment:
+      MAX_UPDATE_PARALLEL: ${self:custom.maxUpdateParallel}
+      UPDATE_PARALLEL: ${self:custom.updateParallel}
+      PUBLISH_BATCH_SIZE: ${self:custom.publishBatchSize}
+    events:
+      - stream:
+          type: kinesis
+          arn:
+            Fn::GetAtt:
+              - EcommerceKinesisStream
+              - Arn
+          batchSize: 100
+          startingPosition: TRIM_HORIZON
+          bisectBatchOnFunctionError: true
+          functionResponseTypes:
+            - ReportBatchItemFailures
+          maximumRetryAttempts: 3
+          destination:
+            onFailure:
+              Fn::GetAtt:
+                - ConsumerDLQ
+                - Arn
+
+  notificationConsumer:
+    handler: src/consumers/notificationConsumer/index.handler
+    description: "Notification Consumer Lambda function"
+    timeout: 300
+    environment:
+      UPDATE_PARALLEL: ${self:custom.updateParallel}
+    events:
+      - stream:
+          type: kinesis
+          arn:
+            Fn::GetAtt:
+              - EcommerceKinesisStream
+              - Arn
+          batchSize: 100
+          startingPosition: TRIM_HORIZON
+          bisectBatchOnFunctionError: true
+          functionResponseTypes:
+            - ReportBatchItemFailures
+          maximumRetryAttempts: 3
+          destination:
+            onFailure:
+              Fn::GetAtt:
+                - ConsumerDLQ
+                - Arn
+
+  inventoryConsumer:
+    handler: src/consumers/inventoryConsumer/index.handler
+    description: "Inventory Consumer Lambda function"
+    timeout: 300
+    environment:
+      UPDATE_PARALLEL: ${self:custom.updateParallel}
+    events:
+      - stream:
+          type: kinesis
+          arn:
+            Fn::GetAtt:
+              - EcommerceKinesisStream
+              - Arn
+          batchSize: 100
+          startingPosition: TRIM_HORIZON
+          bisectBatchOnFunctionError: true
+          functionResponseTypes:
+            - ReportBatchItemFailures
+          maximumRetryAttempts: 3
+          destination:
+            onFailure:
+              Fn::GetAtt:
+                - ConsumerDLQ
+                - Arn
+
+  dlqConsumer:
+    handler: src/consumers/dlqConsumer/index.handler
+    description: "DLQ Consumer Lambda function"
+    timeout: 300
+    environment:
+      UPDATE_PARALLEL: ${self:custom.updateParallel}
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - ConsumerDLQ
+              - Arn
+          batchSize: 10
+          maximumRetryAttempts: 3
+      - eventBridge:
+          arn:
+            Fn::GetAtt:
+              - EcommerceEventBus
+              - Arn
+          pattern:
+            source:
+              - ${self:provider.environment.EVENT_SOURCE}
+            detail-type:
+              - "FaultEvent"
+
+resources:
+  Resources:
+    EcommerceTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        AttributeDefinitions:
+          - { AttributeName: pk, AttributeType: S }
+          - { AttributeName: sk, AttributeType: S }
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: sk-pk-index
+            KeySchema:
+              - AttributeName: sk
+                KeyType: HASH
+              - AttributeName: pk
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        TimeToLiveSpecification:
+          Enabled: true
+          AttributeName: ttl
+
+    ConsumerDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:custom.dlqqName}
+        MessageRetentionPeriod: 1209600 # 14 days in seconds
+        VisibilityTimeout: 120
+        KmsMasterKeyId: alias/aws/sqs
+
+    ConsumerDLQPolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - Ref: ConsumerDLQ
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: AllowLambdaOnFailure
+              Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sqs:SendMessage
+              Resource:
+                - Fn::GetAtt:
+                    - ConsumerDLQ
+                    - Arn
+            - Sid: AllowEventBridgeOnFailure
+              Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sqs:SendMessage
+              Resource:
+                - Fn::GetAtt:
+                    - ConsumerDLQ
+                    - Arn
+
+    DLQDepthAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:provider.stage}-ecommerce-dlq-depth-alarm
+        AlarmDescription: "Alarm when the DLQ depth exceeds 10 messages"
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value:
+              Fn::GetAtt:
+                - ConsumerDLQ
+                - QueueName
+        Statistic: Maximum
+        Period: 300 # 5 minutes
+        EvaluationPeriods: 1
+        Threshold: 1
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions:
+          - Fn::GetAtt:
+              - DLQDepthAlarmSNS
+              - Arn
+
+    EcommerceEventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: ${self:custom.eventBusName}
+
+    EcommerceKinesisStream:
+      Type: AWS::Kinesis::Stream
+      Properties:
+        Name: ${self:custom.kinesisStreamName}
+        ShardCount: 1
+        RetentionPeriodHours: 24
+        StreamEncryption:
+          EncryptionType: KMS
+          KeyId: alias/aws/kinesis
+
+    AllEventsToKinesisStreamRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: ${self:provider.stage}-all-events-to-kinesis-stream
+        EventBusName: ${self:custom.eventBusName}
+        Description: "Route all events from the event bus to the Kinesis stream"
+        EventPattern:
+          source:
+            - ${self:provider.environment.EVENT_SOURCE}
+        State: ENABLED
+        Targets:
+          - Arn:
+              Fn::GetAtt:
+                - EcommerceKinesisStream
+                - Arn
+            Id: KinesisStreamTarget
+            RoleArn:
+              Fn::GetAtt:
+                - EventBridgeToKinesisRole
+                - Arn
+            KinesisParameters:
+              PartitionKeyPath: "$.detail.partitionKey"
+
+    FaultEventsRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: ${self:provider.stage}-fault-events-rule
+        EventBusName: ${self:custom.eventBusName}
+        Description: "Route fault events to the DLQ"
+        EventPattern:
+          source:
+            - ${self:provider.environment.EVENT_SOURCE}
+          detail-type:
+            - "FaultEvent"
+        State: ENABLED
+        Targets:
+          - Arn:
+              Fn::GetAtt:
+                - ConsumerDLQ
+                - Arn
+            Id: DLQTarget
+            RoleArn:
+              Fn::GetAtt:
+                - EventBridgeToSQSRole
+                - Arn
+
+    EventBridgeToKinesisRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:provider.stage}-eventbridge-to-kinesis-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: EventBridgeToKinesisPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - kinesis:PutRecord
+                    - kinesis:PutRecords
+                  Resource:
+                    - Fn::GetAtt:
+                        - EcommerceKinesisStream
+                        - Arn
+
+    EventBridgeToSQSRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:provider.stage}-eventbridge-to-sqs-role
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: EventBridgeToSQSPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sqs:SendMessage
+                  Resource:
+                    - Fn::GetAtt:
+                        - ConsumerDLQ
+                        - Arn
+
+    FaultLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: ${self:custom.faultGroupName}
+        RetentionInDays: 7
+
+  Outputs:
+    EcommerceTableName:
+      Description: "DynamoDB Table Name"
+      Value: ${self:custom.tableName}
+    EcommerceEventBusName:
+      Description: "EventBridge Event Bus Name"
+      Value: ${self:custom.eventBusName}
+    EcommerceKinesisStreamName:
+      Description: "Kinesis Stream Name"
+      Value: ${self:custom.kinesisStreamName}
+    ConsumerDLQName:
+      Description: "SQS Dead Letter Queue Name"
+      Value: ${self:custom.dlqqName}
