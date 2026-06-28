@@ -8,9 +8,9 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "deploy:dev": "serverless deploy --stage dev",
+    "deploy:dev": "serverless deploy --stage dev --verbose",
     "deploy:prod": "serverless deploy --stage prod",
-    "remove": "serverless remove --stage dev",
+    "remove": "serverless remove --stage dev --verbose",
     "offline": "serverless offline start",
     "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'"
   },

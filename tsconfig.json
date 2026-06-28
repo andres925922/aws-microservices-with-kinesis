@@ -21,7 +21,7 @@
       ]
     },
     // Common Options
-    "module": "commonjs",
+    "module": "ES2020",
     "moduleResolution": "node",
     "declaration": true,
     "strict": true,

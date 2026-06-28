@@ -1,11 +1,13 @@
 service: ecommerce-event-hub
 frameworkVersion: "4"
+configValidationMode: warn
 plugins:
   - serverless-offline
 
 provider:
   name: aws
   runtime: nodejs20.x
+  profile: andres-cli
   region: ${opt:region, 'us-east-1'}
   stage: ${opt:stage, 'dev'}
   memorySize: 256
@@ -278,7 +280,7 @@ resources:
         ComparisonOperator: GreaterThanOrEqualToThreshold
         TreatMissingData: notBreaching
         AlarmActions:
-          - Fn::GetAtt: [DLQDepthAlarmSNS, Arn]
+          - Ref: DLQDepthAlarmSNS
 
     DLQDepthAlarmSNS:
       Type: AWS::SNS::Topic
@@ -305,7 +307,7 @@ resources:
       Type: AWS::Events::Rule
       Properties:
         Name: ${self:provider.stage}-all-events-to-kinesis-stream
-        EventBusName: ${self:custom.eventBusName}
+        EventBusName: !Ref EcommerceEventBus
         Description: "Route all events from the event bus to the Kinesis stream"
         EventPattern:
           source:
@@ -324,7 +326,7 @@ resources:
       Type: AWS::Events::Rule
       Properties:
         Name: ${self:provider.stage}-fault-events-rule
-        EventBusName: ${self:custom.eventBusName}
+        EventBusName: !Ref EcommerceEventBus
         Description: "Route fault events to the DLQ"
         EventPattern:
           source:
