@@ -7,7 +7,7 @@ plugins:
 provider:
   name: aws
   runtime: nodejs20.x
-  profile: andres-cli
+  profile: ${env:AWS_PROFILE}
   region: ${opt:region, 'us-east-1'}
   stage: ${opt:stage, 'dev'}
   memorySize: 256
