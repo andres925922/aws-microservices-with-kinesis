@@ -20,87 +20,77 @@ provider:
     TABLE_NAME: ${self:custom.tableName}
     EVENT_BUS_NAME: ${self:custom.eventBusName}
     KINESIS_STREAM_NAME: ${self:custom.kinesisStreamName}
-    DLQ_NAME: ${self:custom.dlqqName}
+    DLQ_NAME: ${self:custom.dlqName}
     EVENT_SOURCE: ${self:provider.stage}::ecommerce-event-hub
     NODE_OPTIONS: --enable-source-maps
+
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:BatchGetItem
+            - dynamodb:BatchWriteItem
+          Resource:
+            - Fn::GetAtt: [EcommerceTable, Arn]
+            - Fn::Sub:
+                - "${TableArn}/index/*"
+                - TableArn:
+                    Fn::GetAtt: [EcommerceTable, Arn]
+
+        - Effect: Allow
+          Action: events:PutEvents
+          Resource:
+            - Fn::GetAtt: [EcommerceEventBus, Arn]
+
+        - Effect: Allow
+          Action:
+            - kinesis:GetRecords
+            - kinesis:GetShardIterator
+            - kinesis:DescribeStream
+            - kinesis:ListShards
+          Resource:
+            - Fn::GetAtt: [EcommerceKinesisStream, Arn]
+
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+            - sqs:ChangeMessageVisibility
+          Resource:
+            - Fn::GetAtt: [ConsumerDLQ, Arn]
+
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource:
+            - "arn:aws:logs:*:*:*"
+
+        - Effect: Allow
+          Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+          Resource: "*"
 
 custom:
   tableName: ${self:provider.stage}-ecommerce-table
   eventBusName: ${self:provider.stage}-ecommerce-event-bus
   kinesisStreamName: ${self:provider.stage}-ecommerce-kinesis-stream
-  dlqqName: ${self:provider.stage}-ecommerce-dlq
+  dlqName: ${self:provider.stage}-ecommerce-dlq
   faultGroupName: /aws/events/${self:provider.stage}/ecommerce-fault-events-log-group
   maxUpdateParallel: 10
   updateParallel: 4
   publishBatchSize: 25
-
-iam:
-  role:
-    statements:
-      - Effect: Allow
-        Action:
-          - dynamodb:PutItem
-          - dynamodb:GetItem
-          - dynamodb:UpdateItem
-          - dynamodb:DeleteItem
-          - dynamodb:Query
-          - dynamodb:Scan
-          - dynamodb:BatchGetItem
-          - dynamodb:BatchWriteItem
-        Resource:
-          Fn::GetAtt:
-            - EcommerceTable
-            - Arn
-          Fn:Sub:
-            - Fn::GetAtt:
-                - EcommerceTable
-                - Arn
-            - "/index/*"
-
-      - Effect: Allow
-        Action: events:PutEvents
-        Resource:
-          Fn::GetAtt:
-            - EcommerceEventBus
-            - Arn
-
-      - Effect: Allow
-        Action:
-          - kinesis:GetRecords
-          - kinesis:GetShardIterator
-          - kinesis:DescribeStream
-          - kinesis:ListShards
-        Resource:
-          Fn::GetAtt:
-            - EcommerceKinesisStream
-            - Arn
-
-      - Effect: Allow
-        Action:
-          - sqs:SendMessage
-          - sqs:ReceiveMessage
-          - sqs:DeleteMessage
-          - sqs:GetQueueAttributes
-          - sqs:ChangeMessageVisibility
-        Resource:
-          Fn::GetAtt:
-            - ConsumerDLQ
-            - Arn
-
-      - Effect: Allow
-        Action:
-          - logs:CreateLogGroup
-          - logs:CreateLogStream
-          - logs:PutLogEvents
-        Resource:
-          Fn::Sub:
-            - "arn:aws:logs:*:*:*"
-
-      - Effect: Allow
-        Action:
-          - xray:PutTraceSegments
-          - xray:PutTelemetryRecords
-        Resource: "*"
 
 functions:
   httpApi:
@@ -208,17 +198,6 @@ functions:
               - ConsumerDLQ
               - Arn
           batchSize: 10
-          maximumRetryAttempts: 3
-      - eventBridge:
-          arn:
-            Fn::GetAtt:
-              - EcommerceEventBus
-              - Arn
-          pattern:
-            source:
-              - ${self:provider.environment.EVENT_SOURCE}
-            detail-type:
-              - "FaultEvent"
 
 resources:
   Resources:
@@ -253,9 +232,9 @@ resources:
     ConsumerDLQ:
       Type: AWS::SQS::Queue
       Properties:
-        QueueName: ${self:custom.dlqqName}
+        QueueName: ${self:custom.dlqName}
         MessageRetentionPeriod: 1209600 # 14 days in seconds
-        VisibilityTimeout: 120
+        VisibilityTimeout: 1800
         KmsMasterKeyId: alias/aws/sqs
 
     ConsumerDLQPolicy:
@@ -272,18 +251,14 @@ resources:
                 Service: lambda.amazonaws.com
               Action: sqs:SendMessage
               Resource:
-                - Fn::GetAtt:
-                    - ConsumerDLQ
-                    - Arn
+                - Fn::GetAtt: [ConsumerDLQ, Arn]
             - Sid: AllowEventBridgeOnFailure
               Effect: Allow
               Principal:
                 Service: events.amazonaws.com
               Action: sqs:SendMessage
               Resource:
-                - Fn::GetAtt:
-                    - ConsumerDLQ
-                    - Arn
+                - Fn::GetAtt: [ConsumerDLQ, Arn]
 
     DLQDepthAlarm:
       Type: AWS::CloudWatch::Alarm
@@ -295,9 +270,7 @@ resources:
         Dimensions:
           - Name: QueueName
             Value:
-              Fn::GetAtt:
-                - ConsumerDLQ
-                - QueueName
+              Fn::GetAtt: [ConsumerDLQ, QueueName]
         Statistic: Maximum
         Period: 300 # 5 minutes
         EvaluationPeriods: 1
@@ -305,9 +278,13 @@ resources:
         ComparisonOperator: GreaterThanOrEqualToThreshold
         TreatMissingData: notBreaching
         AlarmActions:
-          - Fn::GetAtt:
-              - DLQDepthAlarmSNS
-              - Arn
+          - Fn::GetAtt: [DLQDepthAlarmSNS, Arn]
+
+    DLQDepthAlarmSNS:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:provider.stage}-ecommerce-dlq-depth-alarm-sns
+        DisplayName: "DLQ Depth Alarm SNS Topic"
 
     EcommerceEventBus:
       Type: AWS::Events::EventBus
@@ -336,14 +313,10 @@ resources:
         State: ENABLED
         Targets:
           - Arn:
-              Fn::GetAtt:
-                - EcommerceKinesisStream
-                - Arn
+              Fn::GetAtt: [EcommerceKinesisStream, Arn]
             Id: KinesisStreamTarget
             RoleArn:
-              Fn::GetAtt:
-                - EventBridgeToKinesisRole
-                - Arn
+              Fn::GetAtt: [EventBridgeToKinesisRole, Arn]
             KinesisParameters:
               PartitionKeyPath: "$.detail.partitionKey"
 
@@ -361,14 +334,10 @@ resources:
         State: ENABLED
         Targets:
           - Arn:
-              Fn::GetAtt:
-                - ConsumerDLQ
-                - Arn
+              Fn::GetAtt: [ConsumerDLQ, Arn]
             Id: DLQTarget
             RoleArn:
-              Fn::GetAtt:
-                - EventBridgeToSQSRole
-                - Arn
+              Fn::GetAtt: [EventBridgeToSQSRole, Arn]
 
     EventBridgeToKinesisRole:
       Type: AWS::IAM::Role
@@ -415,9 +384,7 @@ resources:
                   Action:
                     - sqs:SendMessage
                   Resource:
-                    - Fn::GetAtt:
-                        - ConsumerDLQ
-                        - Arn
+                    - Fn::GetAtt: [ConsumerDLQ, Arn]
 
     FaultLogGroup:
       Type: AWS::Logs::LogGroup
@@ -437,4 +404,4 @@ resources:
       Value: ${self:custom.kinesisStreamName}
     ConsumerDLQName:
       Description: "SQS Dead Letter Queue Name"
-      Value: ${self:custom.dlqqName}
+      Value: ${self:custom.dlqName}
